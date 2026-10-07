@@ -7,13 +7,14 @@ optimizing macro F1 for eventual use in a mobile transport-mode inference app.
 Evaluate generalization to unseen participants and produce a final model trained
 on all eligible data.
 
-This document specifies planned work. The project currently contains documentation
-only; no pipeline, experiment results, or trained artifact is available. Future
-implementation will adapt relevant ingestion, feature extraction, evaluation,
-and reporting code from `../sydney-window-size-comparison` and its
-`../all-tmd-v2` source into this project. Do not load NOR-TMD data or reuse
-NOR-selected parameters. Run locally without AWS configuration. Mobile
-conversion, app integration, and device validation are future work.
+This document specifies the implemented study protocol. The local pipeline adapts
+ingestion, feature extraction, evaluation, and reporting semantics from
+`../sydney-window-size-comparison` and its `../all-tmd-v2` source. Acceptance tests
+include synthetic end-to-end CPU XGBoost execution; production tuning, accuracy
+results, and a production final artifact are not yet available. Do not load
+NOR-TMD data or reuse NOR-selected parameters. Run locally without AWS
+configuration. Mobile conversion, integration, and device validation remain
+future work. See `README.md` for commands and resume rules.
 
 ## Data
 
@@ -239,7 +240,7 @@ requiring shell redirection or a separate monitoring tool.
 
 ### Implementation sequence
 
-The future implementation sequence is:
+The implemented workflow is:
 
 1. Adapt relevant reference code into this project and establish reproducible
    local dependencies and shared terminal/file logging, without NOR data,
@@ -277,5 +278,26 @@ Acceptance tests must cover:
   completion/output summaries, failure/interruption diagnostics, log-write
   failures, and preservation of earlier logs and clear skip counts on resume.
 
-The current documentation revision changes only this plan and `README.md`.
-It introduces no executable APIs, schemas, types, training runs, or model artifacts.
+## Implementation status
+
+- Implemented `prepare`, `evaluate`, `report`, `final`, and `all` commands, pinned
+  dependencies, immutable identities, atomic caches, operating-system run locks,
+  and automatic terminal/file logging with independent model-fit heartbeats.
+- Implemented strict collector ingestion, common-cohort features and coverage
+  diagnostics, shared participant folds, persistent Optuna studies, independent
+  seeded searches, inner-only selection, and individual outer-refit checkpoints.
+- Implemented pooled metrics, hierarchical bootstrap from saved session clusters,
+  separate nested results, tables/charts, and full-data selection with fixed
+  seed-42 fitting and exact reload prediction/probability verification.
+- Acceptance tests cover filters, feature quality/calculations, class coverage,
+  participant isolation, pooled objectives, trial completion/failure/resume,
+  deterministic interrupted-search recovery, real XGBoost serialization,
+  reporting, cache integrity, and saved logging/heartbeats/errors.
+- Production searches are pending. Tests reduce fits and bootstrap draws
+  internally; CLI budgets remain 100 completed trials and 5,000 bootstrap draws.
+  No production accuracy scores are claimed.
+- Local preparation on 7 October 2026 retained 149 sessions (38 bus, 66 car,
+  45 train) across seven participants from 186 scanned files. All common-cohort
+  and training-partition coverage checks passed. Window counts are 5,107/4,217/
+  3,580 at 100/120/140 seconds; the frozen local run is
+  `local-validation-20261007`, with 21,664 planned fits and no tuning yet.

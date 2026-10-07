@@ -1,91 +1,166 @@
 # Sydney TMD V1
 
-A planned Sydney-only XGBoost project for bus, car, and train classification,
-optimizing macro F1 for eventual mobile transport-mode inference.
+Local Sydney-only XGBoost training for bus (`0`), car (`1`), and train (`2`).
+The pipeline implements [PLAN.md](PLAN.md): frozen common-cohort preparation,
+nested participant validation, resumable tuning, hierarchical-bootstrap reports,
+and separate full-data model selection. No NOR data, NOR-selected parameters,
+cloud configuration, or adjacent Python package is used.
 
-**Status: documentation only.** The experiment and final model have not been
-implemented or run. See [PLAN.md](PLAN.md) for the complete protocol and future
-acceptance criteria.
+**Status:** implemented with synthetic acceptance tests, including real CPU
+XGBoost fitting and exact prediction/probability parity after serialization.
+Production 100-trial searches and the final production artifact have not been run.
+Synthetic scores are not evidence of transport-mode accuracy.
 
-## Planned experiment
+Local preparation on 7 October 2026 (`local-validation-20261007`, one model
+thread) scanned 186 files and retained **149 sessions across seven participants**:
+38 bus, 66 car, and 45 train sessions. Exclusions were 20 non-AU sessions, nine
+unsupported classes, and eight sessions below 140 seconds. All retained sessions
+had valid windows at every size; the 100/120/140-second feature tables contain
+5,107/4,217/3,580 windows. All outer, inner, and final training partitions passed
+class-coverage checks. This snapshot requires 21,664 planned fits. Its local
+manifests, features, and logs are git-ignored; production tuning remains pending.
 
-| Setting | Decision |
+## Setup
+
+Python 3.12+ is required. The dependency lock was validated on CPython 3.14.5 on
+Windows. From this directory in PowerShell:
+
+```powershell
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements.lock
+.venv/Scripts/python -m pip install --no-deps -e .
+.venv/Scripts/python -m pytest -q --basetemp=.pytest_cache/acceptance
+```
+
+On other platforms use `.venv/bin/python`. The package also runs directly from
+this directory with `python -m sydney_tmd` without an editable installation.
+
+## Local workflow
+
+Prepare and review cohort exclusions and coverage before expensive training:
+
+```powershell
+python -m sydney_tmd prepare --input D:/tmd-data/downloaded_sessions --run-id sydney-20261007 --threads 4
+python -m sydney_tmd evaluate --run-id sydney-20261007
+python -m sydney_tmd report --run-id sydney-20261007
+python -m sydney_tmd final --run-id sydney-20261007
+```
+
+Alternatively, `python -m sydney_tmd all --input <directory> --run-id <new-id>
+--threads 4` executes all four stages. There is no reduced-budget production CLI
+mode. The planned total is `2,709P + 2,701` fits for `P` eligible participants
+(21,664 at seven participants). Threads default to one on preparation, are frozen,
+and are inherited thereafter. A different explicit thread value is rejected.
+Measured fit durations are saved; the report estimates remaining fit time from
+observed throughput, excluding other pipeline work.
+
+`--runs-dir` and `--logs-dir` relocate outputs; keep both outside the input tree.
+Downloading and synchronization are separate prerequisites.
+
+## Input and preparation
+
+Recursively reads non-hidden `*.json` and `*.json.gz` sessions. Payloads contain
+`samples` with millisecond `ts` and vector columns `ax/ay/az`, `gx/gy/gz`, `mx/my/mz`.
+Metadata can be in the payload or reference collector sidecars. For compressed
+files, `name.json.gz.metadata.json` takes precedence over `name.json.metadata.json`.
+Non-session files should be outside the input tree.
+
+Require explicit `collection_country_code: "AU"`, nonempty `participant_id`, and
+supported `vehicle_type`. Missing/non-AU countries, unsupported classes, absent
+samples/participants, and sessions shorter than 140 seconds after trimming are
+recorded as exclusions. There is no maximum duration. Conflicting participant,
+session, or country identities, duplicate sessions, and malformed input stop
+with a diagnostic. Optional trim bounds are inclusive, prefer payload values,
+and accept zero as a valid timestamp.
+
+All window sizes (100/120/140 seconds, stepped by 50/60/70 seconds) must have at
+least one valid window for a session to enter the common cohort. Quality requires
+30/4/2 Hz for accelerometer/gyroscope/magnetometer and at most a 500 ms gap,
+including window boundaries. Features preserve reference Euclidean magnitudes,
+population standard deviation, ordering, and float32 storage. Collector units
+remain m/s², rad/s, and microtesla. Windows are half-open; the reference endpoint
+includes the last sample's median positive sampling interval. Quality counts
+valid rows; features use the first finite vector per timestamp.
+
+Outer LOPO and shuffled three-fold inner splits (split seed 42) share the same
+cohort across windows and seeds. Every training partition must contain all three
+classes. Fewer than four participants or insufficient coverage stops preparation.
+The diagnostic cohort is saved even if splitting is infeasible.
+
+## Training and selection
+
+Each window/outer participant/seed (42, 43, 44) has an independent Optuna TPE
+study: 100 **completed** trials, 10 startup trials, and the nine-parameter search
+space in the plan. Trials run sequentially on CPU, without pruning or early
+stopping. The objective pools inner out-of-fold predictions before calculating
+macro F1 over `[0,1,2]`. Median imputation, missing indicators, and balanced class
+weights fit only the current training partition. No duration balancing is used.
+
+Trial ties choose the earliest trial; window ties choose the shorter window.
+Window selection precedes all held-out predictions. Nested predictions reuse the
+selected window's refit. Final selection runs nine new full-cohort studies,
+chooses the window by mean best validation F1 across seeds, and fits its fixed
+**seed-42** winning configuration. Run reporting before final selection.
+
+## Resume and progress
+
+Rerun the same command with the same run ID. Inputs and sidecars, settings,
+Python/dependency versions, and implementation source hashes form an immutable
+identity; changed values require a new run ID. All commands verify original
+inputs, so keep them available. Prepared artifacts and completed output bundles
+have SHA-256 checksums. An operating-system lock prevents concurrent runs with
+the same identity and releases automatically when a process exits.
+
+Atomic checkpoints retain ingestion/features, individual outer refits, completed
+folds, reports, and final artifacts. SQLite retains Optuna trials. Failed trials
+are saved and do not consume the completed-trial budget; errors stop execution.
+Ctrl+C retains an active trial's parameters for retry. Unfinished fits may repeat;
+completed trials and saved refits are reused. TPE receives a deterministic seed
+per study/trial derived from the experiment seed, preserving uninterrupted/resumed
+trial sequences. Convergence checkpoints are exported at trials 45/75/100.
+Trial durations are wall-clock spans (including pauses for retried trials);
+`fit-times.jsonl` records actual completed fit durations.
+
+Each invocation prints its unique `logs/<run-id>/<attempt-id>/` directory. Invoked
+stages create `ingestion.log`, `feature-extraction.log`, `evaluation.log`, and/or
+`reporting.log`. Flushed UTF-8 JSON-lines events appear identically in the terminal
+and file, with timezone timestamps, severity, run/stage/task context, counts,
+elapsed seconds, warnings, and failure tracebacks. An independent heartbeat runs
+every 20 seconds during long tasks, including fits. Earlier attempts are retained;
+cache hits and new work are distinguished. Saved-log failures stop execution.
+
+## Outputs
+
+Under `runs/<run-id>/`:
+
+| Path | Contents |
 |---|---|
-| Data | New frozen manifest from current local Sydney downloads; explicit `collection_country_code == "AU"` required |
-| Classes | Bus (`0`), car (`1`), train (`2`) |
-| Cohort | Same sessions at every window size; at least 140 seconds and one valid window per size; no maximum duration |
-| Windows / steps | 100 / 50, 120 / 60, and 140 / 70 seconds |
-| Features | 11 sensor-magnitude features in reference order: mean, population standard deviation, range, minimum for accelerometer and gyroscope; standard deviation, range, minimum for magnetometer |
-| Quality rules | Minimum sampling rates of 30/4/2 Hz for accelerometer/gyroscope/magnetometer; maximum gap 500 ms |
-| Evaluation | Outer leave-one-participant-out; three participant-disjoint inner folds shared across windows and seeds, split seed 42 |
-| Search | 100 completed Optuna TPE trials per window, outer fold, and seed, including 10 startup trials |
-| Seeds | 42, 43, 44; repeat both tuning and training independently |
-| Selection | Pooled inner out-of-fold macro F1; select window length inside each outer fold |
-| Reporting | Pooled held-out macro F1 per seed, mean across seeds; fixed-window and nested-selection results reported separately |
-| Uncertainty | 5,000 hierarchical bootstrap draws over seeds, participants, and sessions; 95% percentile intervals; analysis seed 42 |
-| Execution | Local CPU XGBoost, configurable model threads, sequential trials, no pruning or early stopping |
+| `identity.json`, `inputs.json` | Input fingerprints, settings, dependencies, code hash, ingestion decisions |
+| `cohort.json`, `splits.json`, `prepared.json` | Common cohort, exclusions, participant/class coverage, frozen folds, checksums |
+| `events/`, `ingested/`, `features-cache/`, `features-*.parquet` | Resumable normalized events and ordered features |
+| `studies/` | Optuna SQLite database and trial/parameter/score/timing histories |
+| `outer/`, `evaluated.json` | Inner-only selections and held-out predictions/probabilities |
+| `fit-times.jsonl` | Fit durations and task context |
+| `reports/` | Pooled/seed/class/participant metrics, confusion matrices, selection frequencies, bootstrap samples, chart, summary |
+| `final/pipeline.joblib`, `final/metadata.json` | Complete preprocessing/model pipeline and feature/label/window/unit/quality/provenance metadata |
 
-The 100-trial budget is about 2.2 times the previous 45-trial budget for an
-otherwise identical search. It allows more exploration but does not guarantee
-better performance. Record convergence at trials 45, 75, and 100; later budget
-increases require a separately documented experiment.
+Reports separate fixed windows from nested selection. Primary scores pool windows
+within each seed, then average seeds. The 95% percentile intervals use 5,000 draws
+(seed 42): resample seeds, participants within each sampled seed, then sessions
+within each sampled participant, retaining all windows of each sampled session.
+Participant metrics remain separate from pooled-window metrics.
 
-Nested tuning needs **2,700 fits per eligible participant**, plus nine outer
-refits per participant, 2,700 fits for final full-data selection, and one final
-fit. With seven eligible participants, that would be **21,664 fits**. The new
-cohort determines the actual participant count; wall-clock runtime needs local
-benchmarking. Studies will persist progress for resume, and bootstrap reporting
-will reuse saved predictions without retraining.
+Intervals reuse predictions; they do not rerun training/search or undo earlier
+exploratory choices. Longer sessions contribute more windows. Nested evaluation
+estimates the selection procedure, not independent performance of the exact
+full-data artifact. Mobile conversion, integration, and device validation remain
+outside this project. Load joblib artifacts only from trusted runs.
 
-## Local data and implementation approach
+## Implementation
 
-Provide locally downloaded Sydney session JSON or compressed JSON files and
-their country, participant, and transport-mode metadata. Data download and
-synchronization are separate prerequisites. Preparation will freeze a new
-manifest, record exclusions and class coverage, and retain the common
-quality-valid cohort. Missing country labels are excluded. Infeasible participant
-folds or incomplete training-class coverage will stop preparation for review.
-
-Future implementation will adapt relevant code from
-[`sydney-window-size-comparison`](../sydney-window-size-comparison/README.md) and
-its `all-tmd-v2` source into this project. It will use neither NOR data nor
-NOR-selected parameters. No AWS configuration is planned. Runnable setup and
-training commands will be documented when the implementation exists.
-
-## Planned progress monitoring
-
-Ingestion, feature extraction, evaluation (including tuning and refits), and
-reporting will display live terminal progress and automatically save the same
-events. Updates will show the active task, completed/total work where known,
-elapsed time, and an ETA when measurable, with progress or a heartbeat at least
-every 30 seconds during active work. Evaluation will identify the participant,
-window, seed, trial, and inner fold; reporting will show bootstrap progress out
-of 5,000 draws and generated artifact paths.
-
-Logs will be saved as `ingestion.log`, `feature-extraction.log`, `evaluation.log`,
-and `reporting.log` under `logs/<run-id>/<attempt-id>/`, with the directory printed
-at startup. Timestamped UTF-8 logs will include warnings, errors, and completion
-summaries. Resumed invocations will retain previous logs and identify reused work;
-no shell redirection will be required.
-
-## Expected outputs
-
-- Frozen input/cohort/split manifests, cached features, resumable tuning studies,
-  trial histories, timings, parameters, held-out predictions, and saved stage logs.
-- Metric tables, confusion matrices, per-class and participant results,
-  window-selection frequencies, a macro-F1-versus-window chart with intervals,
-  a separate nested-selection result, and a machine-readable study summary.
-- A final preprocessing/model artifact with feature order, label mapping,
-  window settings, quality rules, dependency versions, and provenance.
-
-For the final artifact, run separate 100-trial searches for every window and seed
-using three participant-grouped folds on the full frozen cohort. Select the
-window by mean best-validation macro F1 across seeds, breaking ties by shorter
-window, then fit its seed-42 winning configuration on all cohort data. Keep these
-selection scores separate from held-out evaluation. The final artifact itself
-will not have an independent test cohort in this study.
-
-Bootstrap intervals describe variation in the saved held-out predictions; they
-do not rerun training or remove effects of earlier exploratory study choices.
-Mobile model conversion, app integration, and device validation remain future
-work.
+`data.py` adapts collector ingestion and sensor semantics from
+`../all-tmd-v2/all_tmd/{ingest,features,windowing}.py`; the adjacent
+`sydney-window-size-comparison` provides study/reporting context. This project
+imports neither checkout and reuses neither snapshots nor selected parameters.
+`training.py` owns nested/final searches, `reporting.py` reconstructs metrics,
+`progress.py` saves events and heartbeats, and `cli.py` orchestrates stages.

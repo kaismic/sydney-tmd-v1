@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sydney-tmd-v1"
+version = "1.0.0"
+description = "Local Sydney-only nested participant validation and model selection"
+requires-python = ">=3.12"
+dependencies = ["numpy>=2", "pandas>=2.2", "scikit-learn>=1.6", "xgboost>=3", "optuna>=4", "joblib>=1.4", "matplotlib>=3.9", "pyarrow>=18"]
+
+[project.scripts]
+sydney-tmd = "sydney_tmd.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sydney_tmd*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
