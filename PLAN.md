@@ -10,8 +10,8 @@ on all eligible data.
 This document specifies the implemented study protocol. The local pipeline adapts
 ingestion, feature extraction, evaluation, and reporting semantics from
 `../sydney-window-size-comparison` and its `../all-tmd-v2` source. Acceptance tests
-include synthetic end-to-end CPU XGBoost execution; production tuning, accuracy
-results, and a production final artifact are not yet available. Do not load
+include synthetic end-to-end CPU XGBoost execution; production tuning, reports,
+and a final artifact completed in `sydney-20261007` on 7 October 2026. Do not load
 NOR-TMD data or reuse NOR-selected parameters. Run locally without AWS
 configuration. Mobile conversion, integration, and device validation remain
 future work. See `README.md` for commands and resume rules.
@@ -293,11 +293,17 @@ Acceptance tests must cover:
   participant isolation, pooled objectives, trial completion/failure/resume,
   deterministic interrupted-search recovery, real XGBoost serialization,
   reporting, cache integrity, and saved logging/heartbeats/errors.
-- Production searches are pending. Tests reduce fits and bootstrap draws
-  internally; CLI budgets remain 100 completed trials and 5,000 bootstrap draws.
-  No production accuracy scores are claimed.
+- Production searches completed in `sydney-20261007`, with 100 completed trials
+  per study and 5,000 bootstrap draws per result. The final artifact uses a
+  100-second window and seed 42. Tests reduce fits and bootstrap draws internally.
 - Local preparation on 7 October 2026 retained 149 sessions (38 bus, 66 car,
   45 train) across seven participants from 186 scanned files. All common-cohort
   and training-partition coverage checks passed. Window counts are 5,107/4,217/
   3,580 at 100/120/140 seconds; the frozen local run is
   `local-validation-20261007`, with 21,664 planned fits and no tuning yet.
+- Added optional local MLflow 3.17.0 hosting and a read-only importer in the
+  separate `sydney_tracking` package. The isolated tracking environment preserves
+  existing training identities. Imported runs contain summary/per-seed metrics,
+  confusion heatmaps, tuning histories and winning parameters, and the final
+  artifact. The completed production import has 90 runs; repeated imports reuse
+  unchanged snapshots. This is an explicit post-run import, not live autologging.

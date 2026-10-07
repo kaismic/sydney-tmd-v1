@@ -11,9 +11,13 @@ dependencies = ["numpy>=2", "pandas>=2.2", "scikit-learn>=1.6", "xgboost>=3", "o
 
 [project.scripts]
 sydney-tmd = "sydney_tmd.cli:main"
+sydney-mlflow = "sydney_tracking.__main__:main"
+
+[project.optional-dependencies]
+tracking = ["mlflow==3.17.0"]
 
 [tool.setuptools.packages.find]
-include = ["sydney_tmd*"]
+include = ["sydney_tmd*", "sydney_tracking*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
