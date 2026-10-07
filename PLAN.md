@@ -201,10 +201,49 @@ outside this implementation.
 
 ## Implementation workflow and acceptance criteria
 
+### Terminal progress and saved logs
+
+All ingestion, feature extraction, evaluation (including tuning and refits), and
+reporting steps must emit live, human-readable progress to the terminal and save
+the same events automatically. Logging must be enabled by default, without
+requiring shell redirection or a separate monitoring tool.
+
+- Log stage start, completion, failure, and interruption, plus progress updates
+  at least every 30 seconds while work is active, including during a long model
+  fit. Include an explicit heartbeat when no work unit has finished recently.
+- Include a timestamp with timezone, severity, run ID, stage, current task,
+  completed/total work units when known, and elapsed time. Show percentage and
+  estimated time remaining only when supported by known totals and measured
+  throughput; otherwise show counts and elapsed time without inventing an ETA.
+- Flush each event promptly to both terminal and file. Use newline-delimited
+  text in UTF-8 log files, without terminal control codes or progress-bar redraws,
+  so redirected output and saved logs remain readable.
+- Save separate `ingestion.log`, `feature-extraction.log`, `evaluation.log`, and
+  `reporting.log` files under `logs/<run-id>/<attempt-id>/`. Assign a unique attempt
+  ID to every invocation, print the log directory at startup, and retain previous
+  attempts on resume. Record cache hits and previously completed work separately
+  from newly processed work. Logs supplement the authoritative resume manifests
+  and studies; they do not replace them.
+- Save warnings, exclusion summaries, errors, and exception tracebacks with task
+  context. On handled failure or interruption, flush logs and state what completed
+  and where resumable state remains. A successful stage ends with counts, elapsed
+  time, and output paths. If a log cannot be created or written, surface the error
+  in the terminal and stop rather than silently running without saved logs.
+
+| Step | Required progress details |
+|---|---|
+| Ingestion | Files/sessions scanned out of the discovered total, current session, accepted/excluded/failed counts, exclusion reasons, and manifest output path |
+| Feature extraction | Window length, sessions processed/total, current session, windows generated/retained/rejected, cache hits, and feature/cohort output paths |
+| Evaluation | Nested or final-selection phase, outer participant, window, seed, trial progress out of 100, inner-fold progress out of three, active fit/refit/prediction task, trial score and best-so-far inner score, completed outer folds, and saved prediction/metric paths |
+| Reporting | Result sets loaded/total, active metric or chart, bootstrap draws completed out of 5,000 for each result, and each table/chart/summary output path |
+
+### Implementation sequence
+
 The future implementation sequence is:
 
 1. Adapt relevant reference code into this project and establish reproducible
-   local dependencies, without NOR data, NOR-selected parameters, or AWS setup.
+   local dependencies and shared terminal/file logging, without NOR data,
+   NOR-selected parameters, or AWS setup.
 2. Prepare and freeze inputs, the common cohort, features, and participant splits;
    review exclusions and class coverage before expensive training.
 3. Run resumable nested tuning and outer evaluation, recording convergence and
@@ -213,6 +252,8 @@ The future implementation sequence is:
    and generate the report artifacts.
 5. Run full-data selection, fit and verify the final artifact, and document the
    implemented local workflow and measured results.
+
+### Acceptance criteria
 
 Acceptance tests must cover:
 
@@ -231,6 +272,10 @@ Acceptance tests must cover:
   intervals from saved predictions, including the nested-selection result.
 - Final window/seed selection and prediction/probability parity after artifact
   serialization and reload.
+- Terminal and saved-log coverage for all four steps, timely progress/heartbeats
+  during long tasks, accurate counters and task context, readable flushed files,
+  completion/output summaries, failure/interruption diagnostics, log-write
+  failures, and preservation of earlier logs and clear skip counts on resume.
 
 The current documentation revision changes only this plan and `README.md`.
 It introduces no executable APIs, schemas, types, training runs, or model artifacts.

@@ -52,10 +52,26 @@ its `all-tmd-v2` source into this project. It will use neither NOR data nor
 NOR-selected parameters. No AWS configuration is planned. Runnable setup and
 training commands will be documented when the implementation exists.
 
+## Planned progress monitoring
+
+Ingestion, feature extraction, evaluation (including tuning and refits), and
+reporting will display live terminal progress and automatically save the same
+events. Updates will show the active task, completed/total work where known,
+elapsed time, and an ETA when measurable, with progress or a heartbeat at least
+every 30 seconds during active work. Evaluation will identify the participant,
+window, seed, trial, and inner fold; reporting will show bootstrap progress out
+of 5,000 draws and generated artifact paths.
+
+Logs will be saved as `ingestion.log`, `feature-extraction.log`, `evaluation.log`,
+and `reporting.log` under `logs/<run-id>/<attempt-id>/`, with the directory printed
+at startup. Timestamped UTF-8 logs will include warnings, errors, and completion
+summaries. Resumed invocations will retain previous logs and identify reused work;
+no shell redirection will be required.
+
 ## Expected outputs
 
 - Frozen input/cohort/split manifests, cached features, resumable tuning studies,
-  trial histories, timings, parameters, and held-out predictions.
+  trial histories, timings, parameters, held-out predictions, and saved stage logs.
 - Metric tables, confusion matrices, per-class and participant results,
   window-selection frequencies, a macro-F1-versus-window chart with intervals,
   a separate nested-selection result, and a machine-readable study summary.
