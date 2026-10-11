@@ -10,7 +10,6 @@ import pandas as pd
 from sklearn.metrics import confusion_matrix
 
 from .core import LABELS, SEEDS, WINDOWS, atomic_write, file_hash, read_json, verify_prepared, write_json
-from .training import read_completed_bundle
 
 LIMITATION = ("Intervals resample saved held-out predictions, not the full training/search process; "
               "they do not remove effects of prior exploratory choices, including candidate windows. "
@@ -62,7 +61,37 @@ def bootstrap(rows, draws=5000, seed=42, log=None):
             for i, metric in enumerate(("macro_f1", "balanced_accuracy"))}, results
 
 
+def plot_macro_f1(summary, path):
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), gridspec_kw={"width_ratios": [3, 1]}, sharey=True)
+    xvalues = list(WINDOWS)
+    fixed = [summary[str(window)] for window in WINDOWS]
+    means = [item["mean"]["macro_f1"] for item in fixed]
+    lower = [item["intervals"]["macro_f1"]["low"] for item in fixed]
+    upper = [item["intervals"]["macro_f1"]["high"] for item in fixed]
+    axes[0].fill_between(xvalues, lower, upper, color="#2266aa", alpha=.2)
+    axes[0].plot(xvalues, lower, color="#2266aa", alpha=.5, linewidth=1)
+    axes[0].plot(xvalues, upper, color="#2266aa", alpha=.5, linewidth=1)
+    axes[0].plot(xvalues, means, "-o", color="#2266aa")
+    axes[0].set_xticks(xvalues, [str(window) for window in WINDOWS])
+    nested = summary["nested"]
+    bounds = nested["intervals"]["macro_f1"]
+    axes[1].vlines(0, bounds["low"], bounds["high"], color="#2266aa", linewidth=2)
+    axes[1].plot(0, nested["mean"]["macro_f1"], "o", color="#2266aa")
+    axes[1].set_xticks([0], ["nested"])
+    for ax in axes:
+        ax.set_ylim(0, 1)
+        ax.grid(alpha=.2)
+    axes[0].set(xlabel="Window (seconds)", ylabel="Pooled macro F1, mean over seeds", title="Fixed windows")
+    axes[1].set_title("Nested selection")
+    fig.suptitle("95% hierarchical bootstrap intervals (saved predictions)")
+    fig.tight_layout()
+    atomic_write(path, lambda p: fig.savefig(p, format="png", dpi=180))
+    plt.close(fig)
+
+
 def report(run, log):
+    from .training import read_completed_bundle
+
     _, prepared = verify_prepared(run)
     evaluation = read_json(run / "evaluated.json")
     if evaluation["prepared"] != file_hash(run / "prepared.json"):
@@ -135,23 +164,7 @@ def report(run, log):
         output_names.append(name)
         log.event("table saved", output=str(directory / name))
     log.task("macro F1 chart")
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4), gridspec_kw={"width_ratios": [3, 1]}, sharey=True)
-    for ax, names, xvalues in ((axes[0], [str(w) for w in WINDOWS], list(WINDOWS)),
-                               (axes[1], ["nested"], [0])):
-        for name, x in zip(names, xvalues):
-            item = summary[name]
-            bounds = item["intervals"]["macro_f1"]
-            ax.vlines(x, bounds["low"], bounds["high"], color="#2266aa", linewidth=2)
-            ax.plot(x, item["mean"]["macro_f1"], "o", color="#2266aa")
-        ax.set_ylim(0, 1)
-        ax.grid(alpha=.2)
-        ax.set_xticks(xvalues, names)
-    axes[0].set(xlabel="Window (seconds)", ylabel="Pooled macro F1, mean over seeds", title="Fixed windows")
-    axes[1].set_title("Nested selection")
-    fig.suptitle("95% hierarchical bootstrap intervals (saved predictions)")
-    fig.tight_layout()
-    atomic_write(directory / "macro-f1.png", lambda p: fig.savefig(p, format="png", dpi=180))
-    plt.close(fig)
+    plot_macro_f1(summary, directory / "macro-f1.png")
     output_names.append("macro-f1.png")
     timings = [json.loads(line)["fit_seconds"] for line in (run / "fit-times.jsonl").read_text().splitlines()]
     study_summary = dict(results=summary, labels=LABELS, bootstrap_draws=5000, analysis_seed=42,

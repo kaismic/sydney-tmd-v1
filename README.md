@@ -213,6 +213,8 @@ within each seed, then average seeds. The 95% percentile intervals use 5,000 dra
 (seed 42): resample seeds, participants within each sampled seed, then sessions
 within each sampled participant, retaining all windows of each sampled session.
 Participant metrics remain separate from pooled-window metrics.
+The macro-F1 chart connects fixed-window means and shades the area between their
+lower and upper 95% confidence bounds; nested selection has a separate interval.
 
 Intervals reuse predictions; they do not rerun training/search or undo earlier
 exploratory choices. Longer sessions contribute more windows. Nested evaluation
