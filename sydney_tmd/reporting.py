@@ -170,10 +170,10 @@ def report(run, log):
         output_names.append(name)
         log.event("table saved", output=str(directory / name))
     log.task("macro F1 chart")
-    plot_macro_f1(summary, directory / "macro-f1.png")
+    plot_macro_f1(summary, directory / "macro-f1-with-nested.png")
+    output_names.append("macro-f1-with-nested.png")
+    plot_macro_f1(summary, directory / "macro-f1.png", include_nested=False)
     output_names.append("macro-f1.png")
-    plot_macro_f1(summary, directory / "macro-f1-fixed.png", include_nested=False)
-    output_names.append("macro-f1-fixed.png")
     timings = [json.loads(line)["fit_seconds"] for line in (run / "fit-times.jsonl").read_text().splitlines()]
     study_summary = dict(results=summary, labels=LABELS, bootstrap_draws=5000, analysis_seed=42,
                          limitations=LIMITATION, window_selection_frequency={str(w): int(frequencies.get(w, 0)) for w in WINDOWS},
@@ -187,7 +187,7 @@ def report(run, log):
     atomic_write(directory / "README.md", lambda p: p.write_text(
         "# Sydney TMD evaluation\n\n" + LIMITATION + "\n\nSee `metrics.csv`, `seed-metrics.csv`, "
         "`participant-metrics.csv`, `per-class.csv`, `confusion-matrices.csv`, `window-selection.csv`, "
-        "`macro-f1.png`, `macro-f1-fixed.png`, and `study-summary.json`. "
+        "`macro-f1-with-nested.png`, `macro-f1.png`, and `study-summary.json`. "
         "Full-data final selection is stored separately in `../final/`.\n",
         encoding="utf-8"))
     output_names.append("README.md")
