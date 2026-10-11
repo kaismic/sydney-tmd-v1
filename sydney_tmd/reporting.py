@@ -61,28 +61,34 @@ def bootstrap(rows, draws=5000, seed=42, log=None):
             for i, metric in enumerate(("macro_f1", "balanced_accuracy"))}, results
 
 
-def plot_macro_f1(summary, path):
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4), gridspec_kw={"width_ratios": [3, 1]}, sharey=True)
+def plot_macro_f1(summary, path, include_nested=True):
+    if include_nested:
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4), gridspec_kw={"width_ratios": [3, 1]}, sharey=True)
+        fixed_ax, nested_ax = axes
+    else:
+        fig, fixed_ax = plt.subplots(figsize=(8, 4))
     xvalues = list(WINDOWS)
     fixed = [summary[str(window)] for window in WINDOWS]
     means = [item["mean"]["macro_f1"] for item in fixed]
     lower = [item["intervals"]["macro_f1"]["low"] for item in fixed]
     upper = [item["intervals"]["macro_f1"]["high"] for item in fixed]
-    axes[0].fill_between(xvalues, lower, upper, color="#2266aa", alpha=.2)
-    axes[0].plot(xvalues, lower, color="#2266aa", alpha=.5, linewidth=1)
-    axes[0].plot(xvalues, upper, color="#2266aa", alpha=.5, linewidth=1)
-    axes[0].plot(xvalues, means, "-o", color="#2266aa")
-    axes[0].set_xticks(xvalues, [str(window) for window in WINDOWS])
-    nested = summary["nested"]
-    bounds = nested["intervals"]["macro_f1"]
-    axes[1].vlines(0, bounds["low"], bounds["high"], color="#2266aa", linewidth=2)
-    axes[1].plot(0, nested["mean"]["macro_f1"], "o", color="#2266aa")
-    axes[1].set_xticks([0], ["nested"])
-    for ax in axes:
-        ax.set_ylim(0, 1)
-        ax.grid(alpha=.2)
-    axes[0].set(xlabel="Window (seconds)", ylabel="Pooled macro F1, mean over seeds", title="Fixed windows")
-    axes[1].set_title("Nested selection")
+    fixed_ax.fill_between(xvalues, lower, upper, color="#2266aa", alpha=.2)
+    fixed_ax.plot(xvalues, lower, color="#2266aa", alpha=.5, linewidth=1)
+    fixed_ax.plot(xvalues, upper, color="#2266aa", alpha=.5, linewidth=1)
+    fixed_ax.plot(xvalues, means, "-o", color="#2266aa")
+    fixed_ax.set_xticks(xvalues, [str(window) for window in WINDOWS])
+    fixed_ax.set(xlabel="Window (seconds)", ylabel="Pooled macro F1, mean over seeds", title="Fixed windows")
+    fixed_ax.set_ylim(0, 1)
+    fixed_ax.grid(alpha=.2)
+    if include_nested:
+        nested = summary["nested"]
+        bounds = nested["intervals"]["macro_f1"]
+        nested_ax.vlines(0, bounds["low"], bounds["high"], color="#2266aa", linewidth=2)
+        nested_ax.plot(0, nested["mean"]["macro_f1"], "o", color="#2266aa")
+        nested_ax.set_xticks([0], ["nested"])
+        nested_ax.set_title("Nested selection")
+        nested_ax.set_ylim(0, 1)
+        nested_ax.grid(alpha=.2)
     fig.suptitle("95% hierarchical bootstrap intervals (saved predictions)")
     fig.tight_layout()
     atomic_write(path, lambda p: fig.savefig(p, format="png", dpi=180))
@@ -166,6 +172,8 @@ def report(run, log):
     log.task("macro F1 chart")
     plot_macro_f1(summary, directory / "macro-f1.png")
     output_names.append("macro-f1.png")
+    plot_macro_f1(summary, directory / "macro-f1-fixed.png", include_nested=False)
+    output_names.append("macro-f1-fixed.png")
     timings = [json.loads(line)["fit_seconds"] for line in (run / "fit-times.jsonl").read_text().splitlines()]
     study_summary = dict(results=summary, labels=LABELS, bootstrap_draws=5000, analysis_seed=42,
                          limitations=LIMITATION, window_selection_frequency={str(w): int(frequencies.get(w, 0)) for w in WINDOWS},
@@ -179,7 +187,8 @@ def report(run, log):
     atomic_write(directory / "README.md", lambda p: p.write_text(
         "# Sydney TMD evaluation\n\n" + LIMITATION + "\n\nSee `metrics.csv`, `seed-metrics.csv`, "
         "`participant-metrics.csv`, `per-class.csv`, `confusion-matrices.csv`, `window-selection.csv`, "
-        "`macro-f1.png`, and `study-summary.json`. Full-data final selection is stored separately in `../final/`.\n",
+        "`macro-f1.png`, `macro-f1-fixed.png`, and `study-summary.json`. "
+        "Full-data final selection is stored separately in `../final/`.\n",
         encoding="utf-8"))
     output_names.append("README.md")
     write_json(directory / "complete.json", {"evaluation_sha256": file_hash(run / "evaluated.json"),

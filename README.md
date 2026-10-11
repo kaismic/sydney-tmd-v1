@@ -205,7 +205,7 @@ Under `runs/<run-id>/`:
 | `studies/` | Optuna SQLite database and trial/parameter/score/timing histories |
 | `outer/`, `evaluated.json` | Inner-only selections and held-out predictions/probabilities |
 | `fit-times.jsonl` | Fit durations and task context |
-| `reports/` | Pooled/seed/class/participant metrics, confusion matrices, selection frequencies, bootstrap samples, chart, summary |
+| `reports/` | Pooled/seed/class/participant metrics, confusion matrices, selection frequencies, bootstrap samples, macro-F1 charts, summary |
 | `final/pipeline.joblib`, `final/metadata.json` | Complete preprocessing/model pipeline and feature/label/window/unit/quality/provenance metadata |
 
 Reports separate fixed windows from nested selection. Primary scores pool windows
@@ -213,8 +213,9 @@ within each seed, then average seeds. The 95% percentile intervals use 5,000 dra
 (seed 42): resample seeds, participants within each sampled seed, then sessions
 within each sampled participant, retaining all windows of each sampled session.
 Participant metrics remain separate from pooled-window metrics.
-The macro-F1 chart connects fixed-window means and shades the area between their
-lower and upper 95% confidence bounds; nested selection has a separate interval.
+`macro-f1.png` connects fixed-window means and shades the area between their
+lower and upper 95% confidence bounds, with nested selection in a separate panel.
+`macro-f1-fixed.png` shows only the fixed-window curve and shaded interval.
 
 Intervals reuse predictions; they do not rerun training/search or undo earlier
 exploratory choices. Longer sessions contribute more windows. Nested evaluation
