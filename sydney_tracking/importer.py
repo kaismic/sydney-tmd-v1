@@ -57,6 +57,8 @@ def source_snapshot(source):
     if reports["evaluation_sha256"] != sha256(source / "evaluated.json"):
         raise ValueError("Report/evaluation mismatch")
     names = ["identity.json", "inputs.json", "cohort.json", "splits.json", "prepared.json", "evaluated.json", "fit-times.jsonl"]
+    if (source / "experiment.json").exists():
+        names.append("experiment.json")
     files = [source / n for n in names]
     files.extend((source / "reports").iterdir())
     files.extend(sorted((source / "studies").glob("*.json")))
@@ -171,10 +173,14 @@ class Importer:
     def run(self):
         summary = read_json(self.source / "reports" / "study-summary.json")
         cohort = read_json(self.source / "cohort.json")
+        splits = read_json(self.source / "splits.json")
+        strategy = splits.get("evaluation_strategy", "participant_lopo")
         root_metrics = {f"heldout.{result}.{metric}": value
                         for result, record in summary["results"].items() for metric, value in record["mean"].items()}
         root = self.entity("summary", self.source.name, "summary", params={"participants": cohort["participant_count"],
-                           "sessions": len(cohort["sessions"]), "source_identity": read_json(self.source / "prepared.json")["identity"]},
+                           "sessions": len(cohort["sessions"]), "source_identity": read_json(self.source / "prepared.json")["identity"],
+                           "evaluation_strategy": strategy,
+                           "calibration_fraction": json.dumps(splits.get("calibration_fraction", {mode: 1.0 for mode in LABELS}), sort_keys=True)},
                            metrics=root_metrics,
                            artifacts=[n for n in self.files if n.startswith("reports/") or "/" not in n])
         confusion = csv_rows(self.source / "reports" / "confusion-matrices.csv")
@@ -200,7 +206,6 @@ class Importer:
                                             for m in ("precision", "recall", "f1", "support")})
                     self.entity(f"result/{result}/seed/{seed}", f"{result} — seed {seed}", "heldout_seed", result_id,
                                 params={"window": result, "seed": seed}, metrics=metrics)
-        splits = read_json(self.source / "splits.json")
         for name in sorted(n for n in self.files if n.startswith("studies/")):
             study = read_json(self.source / name)
             trials = [t for t in study["trials"] if t["state"] == "COMPLETE"]
@@ -214,7 +219,10 @@ class Importer:
             params = {**winner["params"], "window_seconds": window, "seed": seed, "winning_trial": winner["number"],
                       "phase": "final_selection" if phase == "final" else "nested_selection"}
             if index is not None:
-                params["outer_participant"] = splits["outer"][int(index)]["participant"]
+                fold = splits["outer"][int(index)]
+                params["outer_fold"] = fold.get("id", fold.get("participant", f"fold-{index}"))
+                if fold.get("participant") is not None:
+                    params["outer_participant"] = fold["participant"]
             history, best = [], -float("inf")
             for trial in trials:
                 best = max(best, trial["value"])
@@ -227,9 +235,12 @@ class Importer:
                         history=history, artifacts=[name])
         if (self.source / "final" / "metadata.json").exists():
             metadata = read_json(self.source / "final" / "metadata.json")
-            self.entity("final", "Final model — full cohort", "final_model", root,
+            fractions = metadata.get("calibration_fraction", {mode: 1.0 for mode in LABELS})
+            full_cohort = all(value == 1.0 for value in fractions.values())
+            self.entity("final", "Final model — full cohort" if full_cohort else "Final model — configured cohort", "final_model", root,
                         params={**metadata["parameters"], "seed": metadata["seed"], "window_seconds": metadata["window_seconds"],
-                                "independent_test_cohort": False},
+                                "independent_test_cohort": False, "evaluation_strategy": metadata.get("evaluation_strategy", strategy),
+                                "calibration_fraction": json.dumps(fractions, sort_keys=True)},
                         metrics={f"selection.window_{w}.macro_f1": v for w, v in metadata["selection_scores"].items()},
                         artifacts=[n for n in self.files if n.startswith("final/")])
         # Detect any source change during an import rather than accepting a mixed snapshot.

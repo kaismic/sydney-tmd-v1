@@ -102,7 +102,8 @@ def report(run, log):
     evaluation = read_json(run / "evaluated.json")
     if evaluation["prepared"] != file_hash(run / "prepared.json"):
         raise ValueError("Evaluation does not match prepared data")
-    expected = [f"outer/fold-{i:03d}-seed-{s}" for i, _ in enumerate(read_json(run / "splits.json")["outer"])
+    splits = read_json(run / "splits.json")
+    expected = [f"outer/fold-{i:03d}-seed-{s}" for i, _ in enumerate(splits["outer"])
                 for s in SEEDS]
     if evaluation["bundles"] != expected:
         raise ValueError("Incomplete or unexpected evaluation bundles")
@@ -125,6 +126,13 @@ def report(run, log):
     rows = pd.concat(frames, ignore_index=True)
     atomic_write(directory / "held-out-predictions.parquet", lambda p: rows.to_parquet(p, index=False))
     cohort = read_json(run / "cohort.json")["sessions"]
+    expected_sessions = (set().union(*(set(fold["test_sessions"]) for fold in splits["outer"]))
+                         if all("test_sessions" in fold for fold in splits["outer"])
+                         else {record["session_id"] for record in cohort})
+    if all("test_sessions" in fold for fold in splits["outer"]):
+        total_test_sessions = sum(len(fold["test_sessions"]) for fold in splits["outer"])
+        if len(expected_sessions) != total_test_sessions:
+            raise ValueError("A test session appears in multiple outer folds")
     summary, seed_metrics, per_class, participants, matrices = {}, [], [], [], []
     output_names = ["held-out-predictions.parquet"]
     for result in [str(w) for w in WINDOWS] + ["nested"]:
@@ -133,7 +141,7 @@ def report(run, log):
         by_seed = {}
         for seed in SEEDS:
             data = group[group.seed == seed]
-            if set(data.session_id) != {r["session_id"] for r in cohort}:
+            if set(data.session_id) != expected_sessions:
                 raise ValueError(f"Missing or unexpected held-out sessions: {result}, {seed}")
             if data.duplicated(["session_id", "window_start_ms"]).any():
                 raise ValueError("Duplicate held-out windows")
@@ -177,6 +185,15 @@ def report(run, log):
     timings = [json.loads(line)["fit_seconds"] for line in (run / "fit-times.jsonl").read_text().splitlines()]
     study_summary = dict(results=summary, labels=LABELS, bootstrap_draws=5000, analysis_seed=42,
                          limitations=LIMITATION, window_selection_frequency={str(w): int(frequencies.get(w, 0)) for w in WINDOWS},
+                         evaluation_strategy=splits.get("evaluation_strategy", "participant_lopo"),
+                         calibration_fraction=splits.get("calibration_fraction", {mode: 1.0 for mode in LABELS}),
+                         test_sessions=sorted(expected_sessions),
+                         outer_folds=[{"id": fold.get("id", fold.get("participant")),
+                                       "training_pool_counts": fold.get("training_pool_counts"),
+                                       "training_counts": fold.get("training_counts"),
+                                       "test_counts": fold.get("test_counts"),
+                                       "test_sessions": fold.get("test_sessions")} for fold in splits["outer"]],
+                         final_training_counts=splits.get("final_training_counts"),
                          planned_fits=prepared["planned_fits"], measured_fits=len(timings),
                          measured_fit_seconds=sum(timings), mean_fit_seconds=float(np.mean(timings)),
                          median_fit_seconds=float(np.median(timings)),
@@ -188,7 +205,8 @@ def report(run, log):
         "# Sydney TMD evaluation\n\n" + LIMITATION + "\n\nSee `metrics.csv`, `seed-metrics.csv`, "
         "`participant-metrics.csv`, `per-class.csv`, `confusion-matrices.csv`, `window-selection.csv`, "
         "`macro-f1-with-nested.png`, `macro-f1.png`, and `study-summary.json`. "
-        "Full-data final selection is stored separately in `../final/`.\n",
+        "The split strategy, requested fractions, actual session counts, and test cohort are in `study-summary.json`. "
+        "The final artifact is selected and fitted separately in `../final/` after evaluation; it is not independently tested.\n",
         encoding="utf-8"))
     output_names.append("README.md")
     write_json(directory / "complete.json", {"evaluation_sha256": file_hash(run / "evaluated.json"),

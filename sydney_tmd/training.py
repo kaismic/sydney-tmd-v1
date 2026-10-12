@@ -60,10 +60,16 @@ def inner_objective(trial, frame, folds, seed, threads, log, timing_path):
     params = suggest(trial)
     actual, predicted = [], []
     for index, fold in enumerate(folds, 1):
-        if set(fold["train"]) & set(fold["validation"]):
+        if "train" in fold and set(fold["train"]) & set(fold["validation"]):
             raise ValueError("Participant leakage in inner split")
-        train = frame[frame.participant_id.isin(fold["train"])]
-        validation = frame[frame.participant_id.isin(fold["validation"])]
+        if "train_sessions" in fold:
+            if set(fold["train_sessions"]) & set(fold["validation_sessions"]):
+                raise ValueError("Session leakage in inner split")
+            train = frame[frame.session_id.isin(fold["train_sessions"])]
+            validation = frame[frame.session_id.isin(fold["validation_sessions"])]
+        else:
+            train = frame[frame.participant_id.isin(fold["train"])]
+            validation = frame[frame.participant_id.isin(fold["validation"])]
         if validation.empty:
             raise ValueError("Empty inner validation partition")
         log.task("inner fit", inner_fold=index, inner_folds=3, trial=trial.number)
@@ -182,10 +188,11 @@ def evaluate(run, log):
     total, completed, hits = len(splits["outer"]) * len(SEEDS), 0, 0
     paths = []
     for index, fold in enumerate(splits["outer"]):
-        participant = fold["participant"]
+        participant = fold.get("participant")
+        fold_id = fold.get("id", participant)
         for seed in SEEDS:
             directory = run / "outer" / f"fold-{index:03d}-seed-{seed}"
-            log.task("outer selection", phase="nested", outer_participant=participant, seed=seed,
+            log.task("outer selection", phase="nested", outer_fold=fold_id, outer_participant=participant, seed=seed,
                      completed_outer_folds=completed, total_outer_folds=total)
             if read_completed_bundle(directory):
                 hits += 1
@@ -194,12 +201,13 @@ def evaluate(run, log):
                 winners = {}
                 for w in WINDOWS:
                     log.task("tune window", window=w)
-                    train = frames[w][frames[w].participant_id.isin(fold["train"])]
+                    train = (frames[w][frames[w].session_id.isin(fold["train_pool_sessions"])]
+                             if "train_pool_sessions" in fold else frames[w][frames[w].participant_id.isin(fold["train"])])
                     winners[w] = search(run, f"outer-{index:03d}-w{w}-s{seed}", train, fold["inner"],
                                         seed, identity["threads"], log)
                 selected = choose_window(winners)
                 # Select before seeing any held-out predictions. Reuse the selected window's refit.
-                write_json(directory / "selection.json", {"participant": participant, "seed": seed,
+                write_json(directory / "selection.json", {"fold_id": fold_id, "participant": participant, "seed": seed,
                                                            "selected_window": selected, "winners": winners})
                 predictions = []
                 for w in WINDOWS:
@@ -209,8 +217,10 @@ def evaluate(run, log):
                         rows = pd.read_parquet(refit / "predictions.parquet")
                     else:
                         log.task("outer refit", window=w, selected_window=selected, inner_fold=None)
-                        train = frames[w][frames[w].participant_id.isin(fold["train"])]
-                        heldout = frames[w][frames[w].participant_id == participant]
+                        train = (frames[w][frames[w].session_id.isin(fold["train_sessions"])]
+                                 if "train_sessions" in fold else frames[w][frames[w].participant_id.isin(fold["train"])])
+                        heldout = (frames[w][frames[w].session_id.isin(fold["test_sessions"])]
+                                   if "test_sessions" in fold else frames[w][frames[w].participant_id == participant])
                         estimator = fit(train, winners[w]["params"], seed, identity["threads"], log, run / "fit-times.jsonl")
                         log.task("outer prediction", window=w)
                         rows = prediction_rows(estimator, heldout, seed, w)
@@ -253,7 +263,8 @@ def train_final(run, log):
     if read_completed_bundle(directory):
         log.event("final artifact cache hit", previously_completed=1, newly_completed=0, output=str(directory))
         return
-    splits = read_json(run / "splits.json")["final"]
+    split_manifest = read_json(run / "splits.json")
+    splits = split_manifest["final"]
     frames = {w: pd.read_parquet(run / f"features-{w}.parquet") for w in WINDOWS}
     winners = {}
     for w in WINDOWS:
@@ -264,15 +275,21 @@ def train_final(run, log):
     selected, means = final_window(winners)
     selected_params = winners[selected][42]["params"]
     log.task("final fit", window=selected, seed=42, inner_fold=None)
-    estimator = fit(frames[selected], selected_params, 42, identity["threads"], log, run / "fit-times.jsonl")
+    training_frame = (frames[selected][frames[selected].session_id.isin(split_manifest["final_train_sessions"])]
+                      if "final_train_sessions" in split_manifest else frames[selected])
+    estimator = fit(training_frame, selected_params, 42, identity["threads"], log, run / "fit-times.jsonl")
     artifact = directory / "pipeline.joblib"
     atomic_write(artifact, lambda p: joblib.dump(estimator, p))
     log.task("verify artifact prediction and probability parity")
-    verify_artifact(artifact, frames[selected], estimator)
+    verify_artifact(artifact, training_frame, estimator)
     metadata = dict(protocol=PROTOCOL, ordered_features=FEATURES, labels=LABELS, window_seconds=selected,
                     step_seconds=selected//2, seed=42, parameters=selected_params, dependency_versions=environment(),
                     provenance=identity, prepared_sha256=file_hash(run / "prepared.json"),
                     selection_scores=means, winners=winners, artifact_sha256=file_hash(artifact),
+                    evaluation_strategy=split_manifest.get("evaluation_strategy", "participant_lopo"),
+                    calibration_fraction=split_manifest.get("calibration_fraction", {mode: 1.0 for mode in LABELS}),
+                    final_training_sessions=split_manifest.get("final_train_sessions", sorted(frames[selected].session_id.unique())),
+                    final_training_counts=split_manifest.get("final_training_counts"),
                     independent_test_cohort=False, reload_parity="exact predictions and probabilities on all training windows")
     write_json(directory / "metadata.json", metadata)
     write_json(directory / "complete.json", {"files": {n: file_hash(directory / n)

@@ -109,6 +109,8 @@ def run_lock(run):
 
 def verify_prepared(run):
     identity = read_json(run / "identity.json")
+    if "configuration" in identity and read_json(run / "experiment.json") != identity["configuration"]:
+        raise ValueError("Saved experiment configuration changed: prepare with a new run ID")
     if identity["code"] != code_fingerprint() or identity["environment"] != environment():
         raise ValueError("Code/dependencies changed: prepare with a new run ID")
     marker = read_json(run / "prepared.json")

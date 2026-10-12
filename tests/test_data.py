@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from sydney_tmd.config import load_config, validate_config
+from sydney_tmd.cli import main as cli_main
 from sydney_tmd.core import FEATURES, SENSORS, read_json
 from sydney_tmd.data import extract, load_session, make_splits, prepare
 from sydney_tmd.progress import Attempt
@@ -99,7 +101,11 @@ def test_splits_disjoint_deterministic_and_diagnostic():
     records = cohort()
     splits = make_splits(records)
     assert splits == make_splits(list(reversed(records)))
+    assert splits["evaluation_strategy"] == "participant_lopo"
+    assert splits["final_train_sessions"] == sorted(r["session_id"] for r in records)
     for outer in splits["outer"]:
+        assert outer["train_sessions"] == outer["train_pool_sessions"]
+        assert sorted(outer["test_sessions"] + outer["train_sessions"]) == sorted(r["session_id"] for r in records)
         validation = []
         for inner in outer["inner"]:
             assert not set(inner["train"]) & set(inner["validation"])
@@ -110,6 +116,66 @@ def test_splits_disjoint_deterministic_and_diagnostic():
         make_splits(cohort(3))
     with pytest.raises(ValueError, match="Missing training classes"):
         make_splits([r for r in records if r["label"] != 2 or r["participant_id"] == "p0"])
+
+
+def test_experiment_config_validation():
+    default = load_config()
+    assert default["evaluation_strategy"] == "participant_lopo"
+    assert set(default["calibration_fraction"].values()) == {1.0}
+    for invalid in ({**default, "unknown": 1},
+                    {**default, "evaluation_strategy": "window_shuffle"},
+                    {**default, "calibration_fraction": {"bus": .5, "car": .5}},
+                    {**default, "calibration_fraction": {"bus": 0, "car": .5, "train": .5}},
+                    {**default, "calibration_fraction": {"bus": True, "car": .5, "train": .5}}):
+        with pytest.raises(ValueError):
+            validate_config(invalid)
+
+
+def test_session_holdout_and_training_fractions_are_frozen_and_disjoint():
+    records = [dict(participant_id=f"p{p}", session_id=f"p{p}c{c}n{n}", label=c)
+               for p in range(5) for c in range(3) for n in range(2)]
+    config = {"schema_version": 1, "evaluation_strategy": "shuffled_session_holdout",
+              "calibration_fraction": {"bus": .5, "car": .6, "train": .7}}
+    manifest = make_splits(records, config)
+    assert manifest == make_splits(list(reversed(records)), config)
+    fold = manifest["outer"][0]
+    assert fold["test_counts"] == {"bus": 2, "car": 2, "train": 2}
+    assert fold["training_pool_counts"] == {"bus": 8, "car": 8, "train": 8}
+    assert fold["training_counts"] == {"bus": 4, "car": 4, "train": 5}
+    assert not set(fold["test_sessions"]) & set(fold["train_pool_sessions"])
+    assert not set(fold["test_sessions"]) & set(fold["train_sessions"])
+    validation = []
+    for inner in fold["inner"]:
+        assert not set(inner["train_sessions"]) & set(inner["validation_sessions"])
+        assert not set(inner["train_sessions"]) & set(fold["test_sessions"])
+        validation += inner["validation_sessions"]
+    assert sorted(validation) == fold["train_pool_sessions"]
+    assert manifest["final_training_counts"] == {"bus": 5, "car": 6, "train": 7}
+
+
+def test_participant_fraction_keeps_all_validation_sessions():
+    records = [dict(participant_id=f"p{p}", session_id=f"p{p}c{c}n{n}", label=c)
+               for p in range(5) for c in range(3) for n in range(2)]
+    config = {"schema_version": 1, "evaluation_strategy": "participant_lopo",
+              "calibration_fraction": {"bus": .5, "car": .5, "train": .5}}
+    manifest = make_splits(records, config)
+    for fold in manifest["outer"]:
+        assert fold["training_counts"] == {"bus": 4, "car": 4, "train": 4}
+        assert {r["participant_id"] for r in records if r["session_id"] in fold["test_sessions"]} == {fold["participant"]}
+        for inner in fold["inner"]:
+            training_people = {r["participant_id"] for r in records if r["session_id"] in inner["train_sessions"]}
+            validation_people = {r["participant_id"] for r in records if r["session_id"] in inner["validation_sessions"]}
+            assert not training_people & validation_people
+            assert validation_people == set(inner["validation"])
+
+
+def test_holdout_rejects_sparse_mode():
+    records = [dict(participant_id=f"p{p}", session_id=f"p{p}c{c}", label=c)
+               for p in range(3) for c in range(3)]
+    config = {"schema_version": 1, "evaluation_strategy": "shuffled_session_holdout",
+              "calibration_fraction": {"bus": 1, "car": 1, "train": 1}}
+    with pytest.raises(ValueError, match="at least 3 sessions per mode"):
+        make_splits(records, config)
 
 
 def test_prepare_common_cohort_resume_and_identity(tmp_path):
@@ -130,11 +196,28 @@ def test_prepare_common_cohort_resume_and_identity(tmp_path):
     for window in (100, 120, 140):
         assert set(pd.read_parquet(run / f"features-{window}.parquet").session_id) == {r["session_id"] for r in cohort()}
     marker = read_json(run / "prepared.json")
+    assert read_json(run / "experiment.json") == load_config()
     prepare(source, run, Attempt(tmp_path / "logs", "test"), 1)
     assert marker == read_json(run / "prepared.json")
     assert len(list((tmp_path / "logs" / "test").iterdir())) == 2
     with pytest.raises(ValueError, match="new run ID"):
         prepare(source, run, Attempt(tmp_path / "logs", "test"), 2)
+    changed = {**load_config(), "calibration_fraction": {"bus": .5, "car": 1, "train": 1}}
+    with pytest.raises(ValueError, match="new run ID"):
+        prepare(source, run, Attempt(tmp_path / "logs", "test"), 1, changed)
+    shuffled = {**changed, "evaluation_strategy": "shuffled_session_holdout"}
+    shuffled_path = tmp_path / "shuffled-experiment.json"
+    shuffled_path.write_text(json.dumps(shuffled), encoding="utf-8")
+    assert cli_main(["prepare", "--run-id", "shuffled", "--runs-dir", str(tmp_path),
+                     "--logs-dir", str(tmp_path / "logs"), "--input", str(source),
+                     "--config", str(shuffled_path)]) == 0
+    custom_splits = read_json(tmp_path / "shuffled" / "splits.json")
+    assert custom_splits["evaluation_strategy"] == "shuffled_session_holdout"
+    assert custom_splits["outer"][0]["test_counts"] == {"bus": 1, "car": 1, "train": 1}
+    config_path = tmp_path / "changed-experiment.json"
+    config_path.write_text(json.dumps(changed), encoding="utf-8")
+    assert cli_main(["evaluate", "--run-id", "run", "--runs-dir", str(tmp_path),
+                     "--logs-dir", str(tmp_path / "logs"), "--config", str(config_path)]) == 1
     (source / "new.json").write_text("{}")
     with pytest.raises(ValueError, match="new run ID"):
         prepare(source, run, Attempt(tmp_path / "logs", "test"), 1)

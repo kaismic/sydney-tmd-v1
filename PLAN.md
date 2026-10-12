@@ -307,3 +307,26 @@ Acceptance tests must cover:
   confusion heatmaps, tuning histories and winning parameters, and the final
   artifact. The completed production import has 90 runs; repeated imports reuse
   unchanged snapshots. This is an explicit post-run import, not live autologging.
+
+## Configurable follow-on experiments
+
+The original protocol above describes the completed `sydney-20261007` run.
+Subsequent runs can use a validated, per-run `experiment.json`. The default
+`participant_lopo` strategy with bus/car/train fractions all set to `1.0`
+retains the original evaluation behavior. Other fractions select deterministic
+whole-session subsets separately for each mode in each inner training fold,
+outer refit, and final refit. They never reduce validation or test partitions.
+The final model is selected and fitted after evaluation and has no independent
+test score, even though the evaluation test sessions are eligible for its
+full-cohort training pool.
+
+The `shuffled_session_holdout` strategy reserves 20% of each mode's sessions
+as a single frozen test set, then runs three session-disjoint inner folds on
+the remaining pool. Participants can occur on both sides, but windows from one
+session stay together. Every selected training partition must contain all three
+classes; an infeasible split fails before tuning. All session selections, mode
+counts, requested fractions, and test membership are frozen in `splits.json`
+and shared across windows and model seeds. The fit estimate is based on the
+actual outer-fold count. Reports and MLflow identify the strategy and fractions;
+the importer also accepts the original completed run format. See `README.md`
+for commands and a JSON example.

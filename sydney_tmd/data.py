@@ -4,12 +4,14 @@ from __future__ import annotations
 from collections import Counter
 import gzip
 import json
+import math
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, StratifiedKFold
 
+from .config import load_config, validate_config
 from .core import (FEATURES, LABELS, PROTOCOL, RATES, SENSORS, WINDOWS, atomic_write,
                    code_fingerprint, digest, environment, file_hash, read_json, write_json)
 
@@ -115,28 +117,100 @@ def grouped_folds(participants):
             for a, b in KFold(3, shuffle=True, random_state=42).split(participants)]
 
 
-def make_splits(cohort):
+def make_splits(cohort, config=None):
+    config = load_config() if config is None else validate_config(config)
+    by_id = {r["session_id"]: r for r in cohort}
+    if len(by_id) != len(cohort):
+        raise ValueError("Duplicate session identity in cohort")
+    session_ids = sorted(by_id)
     participants = sorted({r["participant_id"] for r in cohort})
-    if len(participants) < 4:
-        raise ValueError(f"Nested LOPO needs at least 4 participants; eligible={participants}")
+    fractions = config["calibration_fraction"]
 
-    def validate(training, where):
-        present = {r["label"] for r in cohort if r["participant_id"] in training}
-        if present != {0, 1, 2}:
-            raise ValueError(f"Missing training classes {sorted({0, 1, 2} - present)} in {where}; participants={training}")
+    def counts(ids):
+        return {mode: sum(by_id[session]["label"] == label for session in ids)
+                for mode, label in LABELS.items()}
+
+    def require_classes(ids, where):
+        missing = [mode for mode, count in counts(ids).items() if count == 0]
+        if missing:
+            raise ValueError(f"Missing training classes {missing} in {where}; sessions={len(ids)}")
+
+    def selected(ids, where):
+        require_classes(ids, where)
+        chosen = []
+        for mode, label in LABELS.items():
+            eligible = [session for session in sorted(ids) if by_id[session]["label"] == label]
+            count = max(1, math.floor(len(eligible) * fractions[mode]))
+            if count == len(eligible):
+                chosen.extend(eligible)
+            else:
+                rng = np.random.default_rng(int(digest([42, where, mode])[:16], 16))
+                chosen.extend(rng.permutation(eligible)[:count].tolist())
+        chosen = sorted(chosen)
+        require_classes(chosen, where)
+        return chosen
+
+    def participant_inner(pool, where):
+        people = sorted({by_id[session]["participant_id"] for session in pool})
+        result = grouped_folds(people)
+        for index, fold in enumerate(result, 1):
+            available = [session for session in pool if by_id[session]["participant_id"] in fold["train"]]
+            fold["train_sessions"] = selected(available, f"{where}, inner {index}")
+            fold["validation_sessions"] = sorted(session for session in pool
+                                                  if by_id[session]["participant_id"] in fold["validation"])
+        return result
+
+    def session_inner(pool, where):
+        pool = sorted(pool)
+        labels = [by_id[session]["label"] for session in pool]
+        sparse = [mode for mode, count in counts(pool).items() if count < 3]
+        if sparse:
+            raise ValueError(f"Three session inner folds require at least 3 sessions per mode in {where}; insufficient: {sparse}")
+        result = []
+        for index, (train_positions, validation_positions) in enumerate(
+                StratifiedKFold(3, shuffle=True, random_state=42).split(pool, labels), 1):
+            available = [pool[position] for position in train_positions]
+            result.append({"train_sessions": selected(available, f"{where}, inner {index}"),
+                           "validation_sessions": [pool[position] for position in validation_positions]})
+        return result
 
     outer = []
-    for heldout in participants:
-        training = [p for p in participants if p != heldout]
-        validate(training, f"outer {heldout}")
-        folds = grouped_folds(training)
-        for i, fold in enumerate(folds):
-            validate(fold["train"], f"outer {heldout}, inner {i + 1}")
-        outer.append({"participant": heldout, "train": training, "inner": folds})
-    final = grouped_folds(participants)
-    for i, fold in enumerate(final):
-        validate(fold["train"], f"final inner {i + 1}")
-    return {"split_seed": 42, "participants": participants, "outer": outer, "final": final}
+    if config["evaluation_strategy"] == "participant_lopo":
+        if len(participants) < 4:
+            raise ValueError(f"Nested LOPO needs at least 4 participants; eligible={participants}")
+        for heldout in participants:
+            training = [p for p in participants if p != heldout]
+            pool = [session for session in session_ids if by_id[session]["participant_id"] in training]
+            test = [session for session in session_ids if by_id[session]["participant_id"] == heldout]
+            outer.append({"id": heldout, "participant": heldout, "train": training,
+                          "train_pool_sessions": pool, "train_sessions": selected(pool, f"outer {heldout}"),
+                          "test_sessions": test, "inner": participant_inner(pool, f"outer {heldout}")})
+        final = participant_inner(session_ids, "final")
+    else:
+        test = []
+        for mode, label in LABELS.items():
+            eligible = [session for session in session_ids if by_id[session]["label"] == label]
+            if len(eligible) < 2:
+                raise ValueError(f"Shuffled holdout needs at least 2 sessions for {mode}")
+            count = min(len(eligible) - 1, max(1, math.ceil(len(eligible) * .2)))
+            rng = np.random.default_rng(int(digest([42, "test", mode])[:16], 16))
+            test.extend(rng.permutation(eligible)[:count].tolist())
+        test = sorted(test)
+        pool = sorted(set(session_ids) - set(test))
+        outer.append({"id": "shuffled", "train_pool_sessions": pool,
+                      "train_sessions": selected(pool, "outer shuffled"), "test_sessions": test,
+                      "inner": session_inner(pool, "outer shuffled")})
+        final = session_inner(session_ids, "final")
+    final_train = selected(session_ids, "final refit")
+    for fold in outer:
+        fold["training_counts"] = counts(fold["train_sessions"])
+        fold["training_pool_counts"] = counts(fold["train_pool_sessions"])
+        fold["test_counts"] = counts(fold["test_sessions"])
+    return {"schema_version": 2, "split_seed": 42, "evaluation_strategy": config["evaluation_strategy"],
+            "calibration_fraction": fractions, "test_fraction": .2 if config["evaluation_strategy"] == "shuffled_session_holdout" else None,
+            "participants": participants, "outer": outer, "final": final,
+            "final_train_sessions": final_train, "final_training_counts": counts(final_train),
+            "final_pool_counts": counts(session_ids)}
 
 
 def inventory(root, log):
@@ -157,15 +231,20 @@ def verify_inputs(identity, log):
         raise ValueError("Input files changed: use a new run ID")
 
 
-def prepare(root, run, attempt, threads):
+def prepare(root, run, attempt, threads, config=None):
     root = root.resolve()
+    config = load_config() if config is None else validate_config(config)
     with attempt.stage("ingestion") as log:
         inputs = inventory(root, log)
-        identity = dict(protocol=PROTOCOL, threads=threads, input_directory=str(root), inputs=inputs,
+        identity = dict(protocol=PROTOCOL, configuration=config, threads=threads, input_directory=str(root), inputs=inputs,
                         code=code_fingerprint(), environment=environment())
         identity_path = run / "identity.json"
         if identity_path.exists() and read_json(identity_path) != identity:
             raise ValueError("Inputs/settings/code/dependencies changed: use a new run ID")
+        config_path = run / "experiment.json"
+        if config_path.exists() and read_json(config_path) != config:
+            raise ValueError("Saved experiment configuration changed: use a new run ID")
+        write_json(config_path, config)
         write_json(identity_path, identity)
         records, seen, excluded, hits = [], set(), Counter(), 0
         for i, item in enumerate(inputs, 1):
@@ -247,15 +326,15 @@ def prepare(root, run, attempt, threads):
                    "participant_class_coverage": coverage, "participant_count": len(coverage),
                    "class_counts": dict(Counter(r["vehicle_type"] for r in cohort))})
         # Save diagnostic cohort even if the fixed splitting policy is infeasible.
-        log.task("validate participant splits", output=str(run / "cohort.json"))
-        splits = make_splits(cohort)
+        log.task("validate experiment splits", output=str(run / "cohort.json"))
+        splits = make_splits(cohort, config)
         write_json(run / "splits.json", splits)
         for w, frames in all_features.items():
             combined = pd.concat(frames, ignore_index=True)
             atomic_write(run / f"features-{w}.parquet", lambda p: combined.to_parquet(p, index=False))
-        names = ["inputs.json", "cohort.json", "splits.json", *[f"features-{w}.parquet" for w in WINDOWS]]
+        names = ["experiment.json", "inputs.json", "cohort.json", "splits.json", *[f"features-{w}.parquet" for w in WINDOWS]]
         marker = {"identity": digest(identity), "files": {n: file_hash(run / n) for n in names},
-                  "planned_fits": 2709 * len(coverage) + 2701}
+                  "planned_fits": 2709 * len(splits["outer"]) + 2701}
         write_json(run / "prepared.json", marker)
         log.event("preparation outputs saved", output=str(run), participants=len(coverage),
                   planned_fits=marker["planned_fits"], completed=len(eligible), total=len(eligible))

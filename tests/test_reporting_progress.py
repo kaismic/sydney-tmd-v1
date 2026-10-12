@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from sydney_tmd.core import FEATURES, PROTOCOL, code_fingerprint, digest, environment, file_hash, read_json, write_json
+from sydney_tmd.config import load_config
 from sydney_tmd.data import make_splits
 from sydney_tmd.progress import Attempt, Progress
 from sydney_tmd import reporting, training
@@ -66,15 +67,21 @@ def test_log_creation_and_write_failure(tmp_path, capsys):
     assert "cannot write log" in capsys.readouterr().err
 
 
-def prepared_fixture(run):
+def prepared_fixture(run, config=None):
     run.mkdir()
     cohort = [dict(participant_id=f"p{p}", session_id=f"p{p}-{c}", label=c)
               for p in range(4) for c in range(3)]
     identity = dict(protocol=PROTOCOL, code=code_fingerprint(), environment=environment(), threads=1)
+    if config is not None:
+        identity["configuration"] = config
+        write_json(run / "experiment.json", config)
     write_json(run / "identity.json", identity)
     write_json(run / "cohort.json", {"sessions": cohort})
-    write_json(run / "splits.json", make_splits(cohort))
+    splits = make_splits(cohort, config)
+    write_json(run / "splits.json", splits)
     files = ["cohort.json", "splits.json"]
+    if config is not None:
+        files.append("experiment.json")
     for w in (100, 120, 140):
         data = pd.DataFrame(cohort)
         for i, feature in enumerate(FEATURES):
@@ -83,7 +90,8 @@ def prepared_fixture(run):
         name = f"features-{w}.parquet"
         data.to_parquet(run / name, index=False)
         files.append(name)
-    write_json(run / "prepared.json", {"identity": digest(identity), "files": {n: file_hash(run / n) for n in files}, "planned_fits": 13537})
+    write_json(run / "prepared.json", {"identity": digest(identity), "files": {n: file_hash(run / n) for n in files},
+                                      "planned_fits": 2709 * len(splits["outer"]) + 2701})
 
 
 def test_end_to_end_real_xgboost_nested_report_final_resume(tmp_path, monkeypatch):
@@ -124,3 +132,31 @@ def test_end_to_end_real_xgboost_nested_report_final_resume(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="Prepared artifact changed"):
         with attempt.stage("evaluation") as log:
             training.evaluate(run, log)
+
+
+def test_shuffled_holdout_report_and_fractional_final_artifact(tmp_path, monkeypatch):
+    config = {**load_config(), "evaluation_strategy": "shuffled_session_holdout",
+              "calibration_fraction": {"bus": .5, "car": .5, "train": .5}}
+    run = tmp_path / "run"
+    prepared_fixture(run, config)
+    original_search, original_bootstrap = training.search, reporting.bootstrap
+    monkeypatch.setattr(training, "search", lambda *args, **kwargs: original_search(*args, **kwargs, budget=1))
+    monkeypatch.setattr(training, "suggest", lambda trial: {"n_estimators": trial.suggest_int("n_estimators", 2, 2)})
+    monkeypatch.setattr(reporting, "bootstrap", lambda rows, **kwargs: original_bootstrap(rows, draws=20, **kwargs))
+    attempt = Attempt(tmp_path / "logs", "shuffled")
+    with attempt.stage("evaluation") as log:
+        training.evaluate(run, log)
+    with attempt.stage("reporting") as log:
+        reporting.report(run, log)
+    with attempt.stage("evaluation") as log:
+        training.train_final(run, log)
+    splits = read_json(run / "splits.json")
+    summary = read_json(run / "reports" / "study-summary.json")
+    predictions = pd.read_parquet(run / "reports" / "held-out-predictions.parquet")
+    assert summary["evaluation_strategy"] == "shuffled_session_holdout"
+    assert set(summary["test_sessions"]) == set(splits["outer"][0]["test_sessions"])
+    assert set(predictions.session_id) == set(summary["test_sessions"])
+    assert not set(predictions.session_id) & set(splits["outer"][0]["train_sessions"])
+    metadata = read_json(run / "final" / "metadata.json")
+    assert metadata["final_training_counts"] == {"bus": 2, "car": 2, "train": 2}
+    assert metadata["independent_test_cohort"] is False

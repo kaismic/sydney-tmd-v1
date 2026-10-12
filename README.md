@@ -2,11 +2,11 @@
 
 Local Sydney-only XGBoost training for bus (`0`), car (`1`), and train (`2`).
 The pipeline implements [PLAN.md](PLAN.md): frozen common-cohort preparation,
-nested participant validation, resumable tuning, hierarchical-bootstrap reports,
-and separate full-data model selection. No NOR data, NOR-selected parameters,
+configurable participant or session evaluation, resumable tuning,
+hierarchical-bootstrap reports, and separate final model selection. No NOR data, NOR-selected parameters,
 cloud configuration, or adjacent Python package is used.
 
-**Status:** implemented and validated. The production run `sydney-20261007`
+**Status:** the original participant-LOPO protocol was implemented and validated. The production run `sydney-20261007`
 completed nested evaluation, reporting, and final model selection on 7 October
 2026. Its final artifact uses a 100-second window and seed 42. The separate
 `local-validation-20261007` run below contains preparation only.
@@ -101,19 +101,51 @@ this directory with `python -m sydney_tmd` without an editable installation.
 
 ## Local workflow
 
+The tracked [`experiment.json`](experiment.json) defines one experiment. Its
+default `participant_lopo` strategy and calibration fractions of `1.0` for bus,
+car, and train reproduce the original study. To compare another condition,
+copy the file outside the session input tree and edit it, for example:
+
+```json
+{
+  "schema_version": 1,
+  "evaluation_strategy": "shuffled_session_holdout",
+  "calibration_fraction": {"bus": 0.8, "car": 0.5, "train": 0.5}
+}
+```
+
+Fractions must be finite numbers greater than zero and at most one, with all
+three modes present. Each fraction selects that share of **whole training
+sessions** per mode in every inner training fold, outer refit, and final fit;
+at least one session per mode is retained. Validation and test sessions are not
+sampled. Session selections use split seed 42 and are shared across windows and
+model seeds. The saved split manifest records requested fractions, actual counts,
+and chosen IDs.
+
+`participant_lopo` tests each participant in turn, with participant-disjoint
+three-fold inner validation. `shuffled_session_holdout` reserves 20% of each
+mode's whole sessions for one fixed test set, then uses session-disjoint
+three-fold inner validation on the remaining pool. A participant may appear on
+both sides of the shuffled split; no window from a test session enters training.
+The two strategies estimate different generalization settings.
+
 Prepare and review cohort exclusions and coverage before expensive training:
 
 ```powershell
-python -m sydney_tmd prepare --input D:/tmd-data/downloaded_sessions --run-id sydney-20261007 --threads 4
-python -m sydney_tmd evaluate --run-id sydney-20261007
-python -m sydney_tmd report --run-id sydney-20261007
-python -m sydney_tmd final --run-id sydney-20261007
+python -m sydney_tmd prepare --input D:/tmd-data/downloaded_sessions --run-id sydney-new-study --threads 4
+python -m sydney_tmd evaluate --run-id sydney-new-study
+python -m sydney_tmd report --run-id sydney-new-study
+python -m sydney_tmd final --run-id sydney-new-study
 ```
 
-Alternatively, `python -m sydney_tmd all --input <directory> --run-id <new-id>
---threads 4` executes all four stages. There is no reduced-budget production CLI
-mode. The planned total is `2,709P + 2,701` fits for `P` eligible participants
-(21,664 at seven participants). Threads default to one on preparation, are frozen,
+For a custom config, pass `--config path/to/experiment.json` to `prepare` or
+`all`. Later commands load the copy saved under `runs/<run-id>/experiment.json`;
+an explicitly supplied config must match it. Alternatively,
+`python -m sydney_tmd all --input <directory> --run-id <new-id> --threads 4
+--config path/to/experiment.json` executes all four stages. There is no
+reduced-budget production CLI mode. The planned total is `2,709F + 2,701`
+fits for `F` outer folds (21,664 for seven-person LOPO; 5,410 for one shuffled
+holdout). Threads default to one on preparation, are frozen,
 and are inherited thereafter. A different explicit thread value is rejected.
 Measured fit durations are saved; the report estimates remaining fit time from
 observed throughput, excluding other pipeline work.
@@ -146,14 +178,16 @@ remain m/s², rad/s, and microtesla. Windows are half-open; the reference endpoi
 includes the last sample's median positive sampling interval. Quality counts
 valid rows; features use the first finite vector per timestamp.
 
-Outer LOPO and shuffled three-fold inner splits (split seed 42) share the same
-cohort across windows and seeds. Every training partition must contain all three
-classes. Fewer than four participants or insufficient coverage stops preparation.
-The diagnostic cohort is saved even if splitting is infeasible.
+The default outer LOPO and shuffled three-fold participant inner splits (split
+seed 42) share the same cohort across windows and seeds. The alternate strategy
+uses a single session holdout and three session-disjoint inner folds. Every
+training partition must contain all three classes. Fewer than four participants
+for LOPO, or insufficient session/class coverage for either strategy, stops
+preparation. The diagnostic cohort is saved even if splitting is infeasible.
 
 ## Training and selection
 
-Each window/outer participant/seed (42, 43, 44) has an independent Optuna TPE
+Each window/outer fold/seed (42, 43, 44) has an independent Optuna TPE
 study: 100 **completed** trials, 10 startup trials, and the nine-parameter search
 space in the plan. Trials run sequentially on CPU, without pruning or early
 stopping. The objective pools inner out-of-fold predictions before calculating
@@ -162,13 +196,15 @@ weights fit only the current training partition. No duration balancing is used.
 
 Trial ties choose the earliest trial; window ties choose the shorter window.
 Window selection precedes all held-out predictions. Nested predictions reuse the
-selected window's refit. Final selection runs nine new full-cohort studies,
-chooses the window by mean best validation F1 across seeds, and fits its fixed
-**seed-42** winning configuration. Run reporting before final selection.
+selected window's refit. Final selection runs nine new studies on the eligible
+cohort, chooses the window by mean best validation F1 across seeds, and fits its
+fixed **seed-42** winning configuration on the configured fraction of the full
+cohort. Run reporting before final selection. The final artifact includes data
+previously used for evaluation and has no independent test score.
 
 ## Resume and progress
 
-Rerun the same command with the same run ID. Inputs and sidecars, settings,
+Rerun the same command with the same run ID. Inputs and sidecars, saved experiment settings,
 Python/dependency versions, and implementation source hashes form an immutable
 identity; changed values require a new run ID. All commands verify original
 inputs, so keep them available. Prepared artifacts and completed output bundles
@@ -199,13 +235,13 @@ Under `runs/<run-id>/`:
 
 | Path | Contents |
 |---|---|
-| `identity.json`, `inputs.json` | Input fingerprints, settings, dependencies, code hash, ingestion decisions |
-| `cohort.json`, `splits.json`, `prepared.json` | Common cohort, exclusions, participant/class coverage, frozen folds, checksums |
+| `identity.json`, `experiment.json`, `inputs.json` | Input fingerprints, frozen settings, dependencies, code hash, ingestion decisions |
+| `cohort.json`, `splits.json`, `prepared.json` | Common cohort, exclusions, participant/class coverage, frozen session and fold selections, checksums |
 | `events/`, `ingested/`, `features-cache/`, `features-*.parquet` | Resumable normalized events and ordered features |
 | `studies/` | Optuna SQLite database and trial/parameter/score/timing histories |
 | `outer/`, `evaluated.json` | Inner-only selections and held-out predictions/probabilities |
 | `fit-times.jsonl` | Fit durations and task context |
-| `reports/` | Pooled/seed/class/participant metrics, confusion matrices, selection frequencies, bootstrap samples, macro-F1 charts, summary |
+| `reports/` | Pooled/seed/class/participant metrics, confusion matrices, selection frequencies, bootstrap samples, macro-F1 charts, summary with strategy, calibration counts, and test sessions |
 | `final/pipeline.joblib`, `final/metadata.json` | Complete preprocessing/model pipeline and feature/label/window/unit/quality/provenance metadata |
 
 Reports separate fixed windows from nested selection. Primary scores pool windows
@@ -215,7 +251,7 @@ within each sampled participant, retaining all windows of each sampled session.
 Participant metrics remain separate from pooled-window metrics.
 `macro-f1.png` connects fixed-window means and shades the area between their
 lower and upper 95% confidence bounds, with nested selection in a separate panel.
-`macro-f1-fixed.png` shows only the fixed-window curve and shaded interval.
+`macro-f1.png` shows only the fixed-window curve and shaded interval.
 
 Intervals reuse predictions; they do not rerun training/search or undo earlier
 exploratory choices. Longer sessions contribute more windows. Nested evaluation
@@ -229,5 +265,6 @@ outside this project. Load joblib artifacts only from trusted runs.
 `../all-tmd-v2/all_tmd/{ingest,features,windowing}.py`; the adjacent
 `sydney-window-size-comparison` provides study/reporting context. This project
 imports neither checkout and reuses neither snapshots nor selected parameters.
-`training.py` owns nested/final searches, `reporting.py` reconstructs metrics,
+`config.py` validates experiment settings, `training.py` owns nested/final searches,
+`reporting.py` reconstructs metrics,
 `progress.py` saves events and heartbeats, and `cli.py` orchestrates stages.

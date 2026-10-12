@@ -71,6 +71,41 @@ def test_import_metrics_history_artifacts_and_idempotence(tmp_path):
     assert source_snapshot(source) == before
 
 
+def test_import_shuffled_fractional_run_and_preserve_legacy_support(tmp_path):
+    source = tmp_path / "source"
+    source_fixture(source)
+    config = {"schema_version": 1, "evaluation_strategy": "shuffled_session_holdout",
+              "calibration_fraction": {"bus": .5, "car": .5, "train": .5}}
+    write(source / "experiment.json", config)
+    identity = json.loads((source / "identity.json").read_text())
+    identity["configuration"] = config
+    write(source / "identity.json", identity)
+    write(source / "splits.json", {"evaluation_strategy": "shuffled_session_holdout",
+                                   "calibration_fraction": config["calibration_fraction"],
+                                   "outer": [{"id": "shuffled", "test_sessions": ["s1"]}]})
+    write(source / "prepared.json", {"identity": digest(identity),
+                                     "files": {n: sha256(source / n) for n in ("cohort.json", "splits.json", "experiment.json")}})
+    write(source / "evaluated.json", {"prepared": sha256(source / "prepared.json"), "bundles": []})
+    complete(source / "reports", evaluation_sha256=sha256(source / "evaluated.json"))
+    metadata = json.loads((source / "final" / "metadata.json").read_text())
+    metadata["calibration_fraction"] = config["calibration_fraction"]
+    metadata["evaluation_strategy"] = config["evaluation_strategy"]
+    write(source / "final" / "metadata.json", metadata)
+    complete(source / "final")
+    (source / "studies" / "outer-000-w100-s42.json").write_bytes(
+        (source / "studies" / "final-w100-s42.json").read_bytes())
+    uri = f"sqlite:///{(tmp_path / 'mlflow.db').as_posix()}"
+    client = MlflowClient(tracking_uri=uri)
+    experiment_id = client.create_experiment("shuffled", artifact_location=(tmp_path / "artifacts").as_uri())
+    result = Importer(source, uri, "shuffled").run()
+    assert result["imported"] == 6
+    by_key = {run.data.tags["import.entity"]: run for run in client.search_runs([experiment_id])}
+    assert by_key["summary"].data.params["evaluation_strategy"] == "shuffled_session_holdout"
+    assert by_key["studies/outer-000-w100-s42.json"].data.params["outer_fold"] == "shuffled"
+    assert "outer_participant" not in by_key["studies/outer-000-w100-s42.json"].data.params
+    assert by_key["final"].data.tags["mlflow.runName"] == "Final model — configured cohort"
+
+
 def test_corrupt_artifact_rejected_before_mlflow_access(tmp_path):
     source = tmp_path / "source"
     source_fixture(source)
