@@ -9,70 +9,6 @@ cloud configuration, or adjacent Python package is used.
 The default experiment uses the participant-LOPO protocol. Each user supplies
 their own run ID and input directory; results are saved under `runs/<run-id>/`.
 
-## MLflow UI
-
-Open the [local MLflow UI](http://127.0.0.1:5000) and select the `Sydney TMD V1`
-experiment after importing a completed run.
-The local server stores its SQLite database and served artifacts under `.mlflow/`
-and listens on `127.0.0.1:5000`. It continues running after the starting terminal
-closes; restart it after a reboot. Database/artifacts persist when stopped.
-
-From this project directory in PowerShell:
-
-```powershell
-./scripts/mlflow.ps1 setup   # first-time setup of .venv-mlflow
-./scripts/mlflow.ps1 start
-./scripts/mlflow.ps1 import -RunId my-study
-./scripts/mlflow.ps1 status
-./scripts/mlflow.ps1 stop
-```
-
-Setup uses `requirements-mlflow.lock` in an isolated environment (MLflow 3.17.0,
-validated on Windows/Python 3.14). It does not change the training interpreter or
-dependencies. Use `-Port 5001` consistently for start/import if port 5000 is busy.
-The script never stops another application's listener. Startup diagnostics are in
-`.mlflow/server.stdout.log` and `.mlflow/server.stderr.log`; import logs are saved
-as `.mlflow/import-*.log`. Keep `.mlflow/` to retain the imported results.
-
-Replace `my-study` with the run ID used during training. Import after reporting
-and final selection to include all available outputs. An imported study can
-contain these MLflow runs:
-
-| Run | What to inspect |
-|---|---|
-| Parent study run | Overall held-out metrics; Artifacts → `reports/` for the macro-F1 chart, CSVs, predictions, and study summary |
-| `Result — 100/120/140/nested` | Comparable mean metrics and 95% intervals; Artifacts → `charts/` for count and row-normalized confusion heatmaps |
-| Result seed children | Per-seed scores and bus/car/train precision, recall, F1, and support |
-| `outer-...` / `final-w...` studies | Winning hyperparameters; metric histories `inner.macro_f1` and `inner.best_macro_f1` versus trial step; full trial parameters in JSON artifacts |
-| `Final model — full cohort` | Full-data selection scores and downloadable `final/pipeline.joblib` with its metadata |
-
-Expand the parent run to see children. Filter on `tags.study.kind = 'heldout_result'`
-to compare the four result runs, or `tags.study.kind = 'tuning_study'` for searches.
-Confusion charts keep seeds separate so repeated predictions of the same windows
-are not presented as additional independent observations. Held-out metrics use
-`heldout.*`; tuning uses `inner.*`; final selection uses `selection.*`. The final
-pipeline is a downloadable artifact, not an independently evaluated or registered
-MLflow model. Trial scores are histories within tuning studies rather than
-individual MLflow runs.
-
-Importing reads completed saved outputs and never retrains or rewrites source
-artifacts. It checks manifest checksums without requiring the original training
-environment, so the tracking package lives separately in `sydney_tracking/` and
-does not change the training code fingerprint. Repeating an unchanged import
-reuses existing runs; failed imports can resume. Changed exported content creates
-a new snapshot, preserving the previous import. Run one importer at a time.
-New studies need an explicit import after reporting; this setup does not stream
-live training events automatically.
-
-For a different output directory or experiment name:
-
-```powershell
-.venv-mlflow/Scripts/python -m sydney_tracking --run-dir runs/my-study --tracking-uri http://127.0.0.1:5000 --experiment "Sydney TMD V1"
-.venv-mlflow/Scripts/python -m pytest -q tests/test_tracking.py --basetemp=.pytest_cache/tracking
-```
-
-Server configuration follows the [MLflow tracking-server documentation](https://mlflow.org/docs/latest/self-hosting/architecture/tracking-server/).
-
 ## Setup
 
 Python 3.12+ is required. The dependency lock was validated on CPython 3.14.5 on
@@ -141,6 +77,70 @@ observed throughput, excluding other pipeline work.
 
 `--runs-dir` and `--logs-dir` relocate outputs; keep both outside the input tree.
 Downloading and synchronization are separate prerequisites.
+
+## MLflow UI
+
+Open the [local MLflow UI](http://127.0.0.1:5000) and select the `Sydney TMD V1`
+experiment after importing a completed run.
+The local server stores its SQLite database and served artifacts under `.mlflow/`
+and listens on `127.0.0.1:5000`. It continues running after the starting terminal
+closes; restart it after a reboot. Database/artifacts persist when stopped.
+
+From this project directory in PowerShell:
+
+```powershell
+./scripts/mlflow.ps1 setup   # first-time setup of .venv-mlflow
+./scripts/mlflow.ps1 start
+./scripts/mlflow.ps1 import -RunId my-study
+./scripts/mlflow.ps1 status
+./scripts/mlflow.ps1 stop
+```
+
+Setup uses `requirements-mlflow.lock` in an isolated environment (MLflow 3.17.0,
+validated on Windows/Python 3.14). It does not change the training interpreter or
+dependencies. Use `-Port 5001` consistently for start/import if port 5000 is busy.
+The script never stops another application's listener. Startup diagnostics are in
+`.mlflow/server.stdout.log` and `.mlflow/server.stderr.log`; import logs are saved
+as `.mlflow/import-*.log`. Keep `.mlflow/` to retain the imported results.
+
+Replace `my-study` with the run ID used during training. Import after reporting
+and final selection to include all available outputs. An imported study can
+contain these MLflow runs:
+
+| Run | What to inspect |
+|---|---|
+| Parent study run | Overall held-out metrics; Artifacts → `reports/` for the macro-F1 chart, CSVs, predictions, and study summary |
+| `Result — 100/120/140/nested` | Comparable mean metrics and 95% intervals; Artifacts → `charts/` for count and row-normalized confusion heatmaps |
+| Result seed children | Per-seed scores and bus/car/train precision, recall, F1, and support |
+| `outer-...` / `final-w...` studies | Winning hyperparameters; metric histories `inner.macro_f1` and `inner.best_macro_f1` versus trial step; full trial parameters in JSON artifacts |
+| `Final model — full cohort` | Full-data selection scores and downloadable `final/pipeline.joblib` with its metadata |
+
+Expand the parent run to see children. Filter on `tags.study.kind = 'heldout_result'`
+to compare the four result runs, or `tags.study.kind = 'tuning_study'` for searches.
+Confusion charts keep seeds separate so repeated predictions of the same windows
+are not presented as additional independent observations. Held-out metrics use
+`heldout.*`; tuning uses `inner.*`; final selection uses `selection.*`. The final
+pipeline is a downloadable artifact, not an independently evaluated or registered
+MLflow model. Trial scores are histories within tuning studies rather than
+individual MLflow runs.
+
+Importing reads completed saved outputs and never retrains or rewrites source
+artifacts. It checks manifest checksums without requiring the original training
+environment, so the tracking package lives separately in `sydney_tracking/` and
+does not change the training code fingerprint. Repeating an unchanged import
+reuses existing runs; failed imports can resume. Changed exported content creates
+a new snapshot, preserving the previous import. Run one importer at a time.
+New studies need an explicit import after reporting; this setup does not stream
+live training events automatically.
+
+For a different output directory or experiment name:
+
+```powershell
+.venv-mlflow/Scripts/python -m sydney_tracking --run-dir runs/my-study --tracking-uri http://127.0.0.1:5000 --experiment "Sydney TMD V1"
+.venv-mlflow/Scripts/python -m pytest -q tests/test_tracking.py --basetemp=.pytest_cache/tracking
+```
+
+Server configuration follows the [MLflow tracking-server documentation](https://mlflow.org/docs/latest/self-hosting/architecture/tracking-server/).
 
 ## Input and preparation
 
